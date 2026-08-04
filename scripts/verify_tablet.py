@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Tablet (device ***REMOVED***) bring-up & verification over USB.
+Tablet bring-up & verification over USB.
+Device serial is overridable via --device / $ANDROID_SERIAL / $DEVICE.
 Waits for USB-debugging authorization, then:
  1) collect device specs (model / Android ver / screen / density)
  2) install app-debug.apk
@@ -18,15 +19,33 @@ control channel, but the data channel must connect to that advertised IP.
 Therefore this script performs the FTP upload directly over Wi-Fi using the
 IP returned by /api/status.
 """
-import subprocess, time, re, os, sys, xml.etree.ElementTree as ET
+import subprocess, time, re, os, sys, argparse, xml.etree.ElementTree as ET
 import json
 
-ADB = r"***REMOVED***/platform-tools/adb.exe"
-PKG = "com.example.sony_ftp"
-APK = r"D:/sony_ftp/app/build/outputs/apk/debug/app-debug.apk"
-DEVICE = "***REMOVED***"
-# 日志 / 截图默认落在脚本所在目录，避免污染项目根目录
+# ---- paths derived from this script's location (portable across machines) ----
 _HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(_HERE)                                   # 项目根目录（scripts/ 的父目录）
+
+# ---- 可覆盖参数：命令行 flag 优先，其次环境变量，最后保留本机默认值 ----
+def _parse_args():
+    p = argparse.ArgumentParser(description="Photo Share - 平板 USB 接入与验证脚本")
+    p.add_argument("--device", "-d",
+                   default=os.environ.get("ANDROID_SERIAL") or os.environ.get("DEVICE") or "***REMOVED***",
+                   help="目标设备序列号（默认 ***REMOVED***，或 $ANDROID_SERIAL / $DEVICE）")
+    p.add_argument("--adb",
+                   default=os.environ.get("ADB_BIN", r"***REMOVED***/platform-tools/adb.exe"),
+                   help="adb 可执行文件路径（默认 ***REMOVED***/.../adb.exe 或 $ADB_BIN）")
+    p.add_argument("--apk",
+                   default=os.path.join(ROOT, "app", "build", "outputs", "apk", "debug", "app-debug.apk"),
+                   help="待安装 APK（默认 <根目录>/app/build/outputs/apk/debug/app-debug.apk）")
+    return p.parse_args()
+
+_ARGS = _parse_args()
+ADB = _ARGS.adb
+DEVICE = _ARGS.device
+APK = _ARGS.apk
+PKG = "com.example.sony_ftp"
+# 日志 / 截图默认落在脚本所在目录，避免污染项目根目录
 LOG = os.path.join(_HERE, "verify_tablet.log")
 UI_XML = "/sdcard/ui_tablet.xml"
 

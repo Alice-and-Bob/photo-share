@@ -20,10 +20,11 @@ local.properties
 /.idea/
 
 # 测试 / 调试产生的二进制与 UI 快照（非源码，不入库）
-/shot_*.png
-/1.png
-/2.png
-/ui_*.xml
+# 脚本现已移入 scripts/ 等子目录，故去掉根目录限定，覆盖任意位置的同名产物
+shot_*.png
+1.png
+2.png
+ui_*.xml
 
 # 清理用的临时回收目录（存放从根目录移出的调试产物，不入库）
 /.cleanup_trash/
