@@ -58,14 +58,15 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| FTP 用户名 | `camera` | 相机登录账号 |
-| FTP 密码 | `camera123` | 相机登录密码 |
+| FTP 匿名登录 | 启用 | 相机可无用户名/密码直接上传 |
+| FTP 用户名 | `1111` | 配置账号（匿名之外的备选登录） |
+| FTP 密码 | `1111` | 配置密码 |
 | FTP 端口 | `2121` | 优先 21，失败回退 2121 |
 | HTTP 端口 | `8080` | 优先 80，失败回退 8080 / 18080 |
 | 被动端口段 | `50000-50100` | FTP PASV 数据端口范围 |
 | mDNS 主机名 | `photoshare.local` | 仅用于 HTTP 访问 |
 
-> FTP 不使用 mDNS 域名发现，相机须填 App 内显示的**直连 IP** 上传。
+> FTP 不使用 mDNS 域名发现，相机须填 App 内显示的**直连 IP** 上传；匿名上传时用户名/密码留空即可，或填 `1111` / `1111`。
 
 ---
 
@@ -78,7 +79,7 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 3. 相机连接该热点，FTP 设置：
    - 服务器：App 内显示的 IP（**不是** `photoshare.local`）
    - 端口：`2121`
-   - 用户名：`camera` / 密码：`camera123`
+   - 用户名/密码：留空（匿名上传），或填 `1111` / `1111`
    - 模式：**PASV 被动模式**
 4. 拍摄后照片自动上传到 `DCIM/PhotoShare`，并即时出现在照片墙。
 
@@ -114,6 +115,7 @@ sony_ftp/
 ├── app/src/main/            # 源码：ftp/ http/ repository/ database/ mdns/ ui/ util/ 等
 │   └── assets/web/          # 照片墙网页（index.html / app.js / style.css）
 ├── gradle/                  # Gradle 包装器 + 版本目录
+├── scripts/                 # 开发 / 验证脚本（如设备验证 verify_tablet.py）
 ├── build.gradle.kts         # 顶层构建
 ├── settings.gradle.kts      # 仓库镜像、模块声明
 ├── gradle.properties        # Gradle / Kotlin 守护进程参数

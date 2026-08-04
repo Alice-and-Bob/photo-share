@@ -25,7 +25,9 @@ ADB = r"***REMOVED***/platform-tools/adb.exe"
 PKG = "com.example.sony_ftp"
 APK = r"D:/sony_ftp/app/build/outputs/apk/debug/app-debug.apk"
 DEVICE = "***REMOVED***"
-LOG = r"D:/sony_ftp/verify_tablet.log"
+# 日志 / 截图默认落在脚本所在目录，避免污染项目根目录
+_HERE = os.path.dirname(os.path.abspath(__file__))
+LOG = os.path.join(_HERE, "verify_tablet.log")
 UI_XML = "/sdcard/ui_tablet.xml"
 
 
@@ -207,7 +209,8 @@ if ip:
         from ftplib import FTP
         ftp = FTP()
         ftp.connect(ip, 2121, timeout=10)
-        ftp.login("camera", "camera123")
+        # 服务器已启用匿名登录；也可使用默认账号 1111 / 1111
+        ftp.login()
         payload = (b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
                    b"\xff\xd9" + b"PhotoShare tablet test")
         ftp.storbinary("STOR tablet_test.jpg", __import__("io").BytesIO(payload))
@@ -229,7 +232,7 @@ if status_json is not None:
 # ---------- 7. screenshot ----------
 log("=== screenshot ===")
 adb(["shell", "screencap", "-p", "/sdcard/shot_tablet.png"])
-rc, out, err = adb(["pull", "/sdcard/shot_tablet.png", r"D:/sony_ftp/shot_tablet.png"])
+rc, out, err = adb(["pull", "/sdcard/shot_tablet.png", os.path.join(_HERE, "shot_tablet.png")])
 log(f"pull rc={rc} {out.strip()} {err.strip()}")
 
 log("=== verify_tablet done ===")
