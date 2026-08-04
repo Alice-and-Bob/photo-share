@@ -25,6 +25,9 @@ local.properties
 /2.png
 /ui_*.xml
 
+# 清理用的临时回收目录（存放从根目录移出的调试产物，不入库）
+/.cleanup_trash/
+
 # 代理 / 工作区内部数据（非项目源码）
 /.workbuddy/
 *.log
