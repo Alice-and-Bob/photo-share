@@ -1,0 +1,30 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# 构建产物（gradle 包装器与源码除外）
+**/build/
+.kotlin/
+/.idea/
+
+# 测试 / 调试产生的二进制与 UI 快照（非源码，不入库）
+/shot_*.png
+/1.png
+/2.png
+/ui_*.xml
+
+# 代理 / 工作区内部数据（非项目源码）
+/.workbuddy/
+*.log
