@@ -26,6 +26,10 @@ shot_*.png
 2.png
 ui_*.xml
 
+# Python 脚本缓存（scripts/ 下的验证脚本运行时产生）
+__pycache__/
+*.pyc
+
 # 清理用的临时回收目录（存放从根目录移出的调试产物，不入库）
 /.cleanup_trash/
 

@@ -1,30 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Tablet bring-up & verification over USB.
+Tablet bring-up & verification over USB (MediaStore/Scoped Storage version).
 Device serial is overridable via --device / $ANDROID_SERIAL / $DEVICE.
 Waits for USB-debugging authorization, then:
  1) collect device specs (model / Android ver / screen / density)
- 2) install app-debug.apk
- 3) grant MANAGE_EXTERNAL_STORAGE + POST_NOTIFICATIONS via appops
+ 2) install app-release.apk
+ 3) grant POST_NOTIFICATIONS via appops (no storage permission needed)
  4) launch MainActivity and tap "启动服务器"
  5) verify /api/status via ADB-forwarded HTTP port
  6) verify FTP upload over direct Wi-Fi to the IP reported by the app
- 7) pull a screenshot for the user
+ 7) verify MediaStore record in DCIM/PhotoShare/
+ 8) pull a screenshot for the user
 Logs everything to verify_tablet.log.
-
-Note on FTP: the server uses PASV mode and advertises its real Wi-Fi IP +
-a dynamic high port. A single ADB forward of port 2121 is enough for the
-control channel, but the data channel must connect to that advertised IP.
-Therefore this script performs the FTP upload directly over Wi-Fi using the
-IP returned by /api/status.
 """
 import subprocess, time, re, os, sys, argparse, xml.etree.ElementTree as ET
 import json
 
 # ---- paths derived from this script's location (portable across machines) ----
 _HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(_HERE)                                   # 项目根目录（scripts/ 的父目录）
+ROOT = os.path.dirname(_HERE)
 
 # ---- 可覆盖参数：命令行 flag 优先，其次环境变量，最后保留本机默认值 ----
 def _parse_args():
@@ -36,8 +31,8 @@ def _parse_args():
                    default=os.environ.get("ADB_BIN", r"***REMOVED***/platform-tools/adb.exe"),
                    help="adb 可执行文件路径（默认 ***REMOVED***/.../adb.exe 或 $ADB_BIN）")
     p.add_argument("--apk",
-                   default=os.path.join(ROOT, "app", "build", "outputs", "apk", "debug", "app-debug.apk"),
-                   help="待安装 APK（默认 <根目录>/app/build/outputs/apk/debug/app-debug.apk）")
+                   default=os.path.join(ROOT, "app", "build", "outputs", "apk", "release", "app-release.apk"),
+                   help="待安装 APK（默认 <根目录>/app/build/outputs/apk/release/app-release.apk）")
     return p.parse_args()
 
 _ARGS = _parse_args()
@@ -45,7 +40,7 @@ ADB = _ARGS.adb
 DEVICE = _ARGS.device
 APK = _ARGS.apk
 PKG = "com.example.sony_ftp"
-# 日志 / 截图默认落在脚本所在目录，避免污染项目根目录
+GALLERY_REL_PATH = "DCIM/PhotoShare/"
 LOG = os.path.join(_HERE, "verify_tablet.log")
 UI_XML = "/sdcard/ui_tablet.xml"
 
@@ -132,6 +127,14 @@ def dismiss_system_dialog():
     return False
 
 
+def query_mediastore_for_gallery():
+    """Query MediaStore for images saved under DCIM/PhotoShare/."""
+    uri = "content://media.external/images/media"
+    where = f"relative_path='{GALLERY_REL_PATH}'"
+    rc, out, err = adb(["shell", "content", "query", "--uri", uri, "--where", where], timeout=30)
+    return rc, out, err
+
+
 # ---------- 0. wait for USB debugging authorization (up to 30 min) ----------
 log("=== verify_tablet start (waiting for authorization) ===")
 ok = False
@@ -161,10 +164,13 @@ for c in (["wm", "size"], ["wm", "density"], ["settings", "get", "system", "user
 log("=== install ===")
 rc, out, err = adb(["install", "-r", "-t", APK])
 log(f"install rc={rc}\n  out={out.strip()}\n  err={err.strip()}")
+if rc != 0:
+    log("ERROR: install failed; stopping.")
+    sys.exit(1)
 
 # ---------- 3. grants + launch ----------
 log("=== grants + launch ===")
-adb(["shell", "appops", "set", PKG, "MANAGE_EXTERNAL_STORAGE", "allow"])
+# MediaStore writes under Scoped Storage need NO permission on Android 10+.
 adb(["shell", "appops", "set", PKG, "POST_NOTIFICATIONS", "allow"])
 rc, out, err = adb(["shell", "am", "start", "-n", f"{PKG}/.MainActivity"])
 log(f"am start rc={rc} {out.strip()} {err.strip()}")
@@ -240,6 +246,17 @@ if ip:
 else:
     log("  skipping FTP upload (no IP from /api/status)")
 
+# ---------- 7. verify MediaStore gallery record ----------
+log("=== MediaStore gallery check ===")
+rc, out, err = query_mediastore_for_gallery()
+log(f"  query rc={rc}")
+for line in (out + err).strip().splitlines()[:20]:
+    log(f"    {line}")
+if "tablet_test.jpg" in out:
+    log("  PASS: tablet_test.jpg registered in MediaStore under DCIM/PhotoShare/")
+else:
+    log("  FAIL: tablet_test.jpg NOT found in MediaStore gallery")
+
 # re-check count after upload
 if status_json is not None:
     try:
@@ -248,7 +265,7 @@ if status_json is not None:
     except Exception as e:
         log(f"  re-check status err: {e}")
 
-# ---------- 7. screenshot ----------
+# ---------- 8. screenshot ----------
 log("=== screenshot ===")
 adb(["shell", "screencap", "-p", "/sdcard/shot_tablet.png"])
 rc, out, err = adb(["pull", "/sdcard/shot_tablet.png", os.path.join(_HERE, "shot_tablet.png")])

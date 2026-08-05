@@ -16,8 +16,8 @@ interface PhotoDao {
     @Update
     suspend fun update(photo: PhotoEntity)
 
-    @Query("SELECT * FROM photos WHERE filePath = :path LIMIT 1")
-    suspend fun getByPath(path: String): PhotoEntity?
+    @Query("SELECT * FROM photos WHERE contentUri = :uri LIMIT 1")
+    suspend fun getByUri(uri: String): PhotoEntity?
 
     @Query("SELECT * FROM photos WHERE fileName = :name AND uploadComplete = 1 ORDER BY id DESC LIMIT 1")
     suspend fun getByName(name: String): PhotoEntity?
@@ -41,24 +41,21 @@ interface PhotoDao {
     @Query("SELECT MAX(id) FROM photos WHERE uploadComplete = 1")
     suspend fun latestId(): Long?
 
-    @Query("SELECT filePath FROM photos")
-    suspend fun getAllPaths(): List<String>
+    @Query("SELECT contentUri FROM photos")
+    suspend fun getAllUris(): List<String>
 
     /** 重启恢复：找出缩略图未生成的记录继续处理 */
     @Query("SELECT * FROM photos WHERE uploadComplete = 1 AND thumbnailStatus = 0")
     suspend fun getPendingThumbnails(): List<PhotoEntity>
 
-    @Query("UPDATE photos SET thumbnailPath = :thumbPath, thumbnailStatus = :status WHERE filePath = :path")
-    suspend fun updateThumbnail(path: String, thumbPath: String?, status: Int)
+    @Query("UPDATE photos SET thumbnailPath = :thumbPath, thumbnailStatus = :status WHERE contentUri = :uri")
+    suspend fun updateThumbnailByUri(uri: String, thumbPath: String?, status: Int)
 
-    @Query("UPDATE photos SET uploadComplete = 1 WHERE filePath = :path")
-    suspend fun markComplete(path: String)
+    @Query("DELETE FROM photos WHERE contentUri = :uri")
+    suspend fun deleteByUri(uri: String)
 
-    @Query("DELETE FROM photos WHERE filePath = :path")
-    suspend fun deleteByPath(path: String)
-
-    @Query("DELETE FROM photos WHERE filePath IN (:paths)")
-    suspend fun deleteByPaths(paths: List<String>)
+    @Query("DELETE FROM photos WHERE contentUri IN (:uris)")
+    suspend fun deleteByUris(uris: List<String>)
 
     /** 清空照片索引（一键清空存储目录时调用） */
     @Query("DELETE FROM photos")

@@ -4,14 +4,19 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import androidx.exifinterface.media.ExifInterface
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.security.MessageDigest
 
 /**
  * 缩略图生成器：Original Image -> Thumbnail Generator -> Thumbnail Cache。
  * 浏览器照片墙只加载缩略图，禁止直接加载原图。
  * 使用 BitmapFactory + inSampleSize 采样解码，控制内存与 CPU 占用。
+ *
+ * 生成不再依赖「文件系统路径」，而是基于一个稳定 key（通常是 MediaStore contentUri 字符串）
+ * 打开输入流解码，这样无论是 FTP 上传的临时文件还是系统相册里的图片，都能复用同一套逻辑。
  */
 class ThumbnailGenerator(private val cacheDir: File) {
 
@@ -19,7 +24,7 @@ class ThumbnailGenerator(private val cacheDir: File) {
         const val MAX_DIMENSION = 512
         const val JPEG_QUALITY = 82
 
-        fun thumbFileNameFor(sourcePath: String): String = md5(sourcePath) + ".jpg"
+        fun thumbFileNameFor(key: String): String = md5(key) + ".jpg"
 
         fun md5(input: String): String =
             MessageDigest.getInstance("MD5")
@@ -44,39 +49,38 @@ class ThumbnailGenerator(private val cacheDir: File) {
         cacheDir.mkdirs()
     }
 
-    data class Result(val thumbFile: File, val srcWidth: Int, val srcHeight: Int)
-
     /**
      * 生成缩略图（若缓存存在直接复用）。
-     * @return null 表示解码失败（不是有效图片）
+     * @param key 稳定 key（如 MediaStore uri 字符串），用于缓存文件名与去重
+     * @param openStream 打开原图输入流的回调（临时文件或 contentResolver）
+     * @return 缩略图文件，null 表示解码失败（不是有效图片）
      */
-    fun generate(source: File): Result? {
-        if (!source.exists() || source.length() == 0L) return null
+    fun generate(key: String, openStream: () -> InputStream?): File? {
+        if (key.isBlank()) return null
+        val thumbFile = File(cacheDir, thumbFileNameFor(key))
+        if (thumbFile.exists() && thumbFile.length() > 0) return thumbFile
+
+        val stream = openStream() ?: return null
+        val bytes = stream.use { it.readBytes() }
+        if (bytes.isEmpty()) return null
 
         // 1. 只解码边界，拿到原图尺寸
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(source.absolutePath, bounds)
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         val srcW = bounds.outWidth
         val srcH = bounds.outHeight
         if (srcW <= 0 || srcH <= 0) return null
-
-        val thumbFile = File(cacheDir, thumbFileNameFor(source.absolutePath))
-        if (thumbFile.exists() && thumbFile.length() > 0 &&
-            thumbFile.lastModified() >= source.lastModified()
-        ) {
-            return Result(thumbFile, srcW, srcH)
-        }
 
         // 2. 采样解码
         val opts = BitmapFactory.Options().apply {
             inSampleSize = calculateInSampleSize(srcW, srcH, MAX_DIMENSION)
             inPreferredConfig = Bitmap.Config.RGB_565
         }
-        var bitmap = BitmapFactory.decodeFile(source.absolutePath, opts) ?: return null
+        var bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return null
 
         // 3. 根据 EXIF 方向旋转
         try {
-            val orientation = ExifInterface(source).getAttributeInt(
+            val orientation = ExifInterface(ByteArrayInputStream(bytes)).getAttributeInt(
                 ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL
             )
             val matrix = Matrix()
@@ -109,7 +113,7 @@ class ThumbnailGenerator(private val cacheDir: File) {
                 tmp.copyTo(thumbFile, overwrite = true)
                 tmp.delete()
             }
-            Result(thumbFile, srcW, srcH)
+            thumbFile
         } catch (e: Exception) {
             tmp.delete()
             null
@@ -118,8 +122,8 @@ class ThumbnailGenerator(private val cacheDir: File) {
         }
     }
 
-    fun deleteThumbFor(sourcePath: String) {
-        File(cacheDir, thumbFileNameFor(sourcePath)).delete()
+    fun deleteThumbFor(key: String) {
+        File(cacheDir, thumbFileNameFor(key)).delete()
     }
 
     /** 清空缩略图缓存（一键清空存储目录时调用） */

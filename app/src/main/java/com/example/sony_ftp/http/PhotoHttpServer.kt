@@ -1,6 +1,10 @@
 package com.example.sony_ftp.http
 
+import android.content.ContentUris
+import android.content.Context
 import android.content.res.AssetManager
+import android.net.Uri
+import android.provider.MediaStore
 import android.util.Log
 import com.example.sony_ftp.database.PhotoEntity
 import com.example.sony_ftp.repository.PhotoRepository
@@ -18,15 +22,16 @@ import java.net.URLDecoder
  *   GET /                   照片墙网页（assets/web）
  *   GET /api/photos         照片列表 JSON（分页 ?page=&size=）
  *   GET /api/status         服务状态（照片总数、latestId，用于网页增量刷新）
- *   GET /thumb/{filename}   缩略图
- *   GET /download/{filename} 原图下载，支持 HTTP Range 断点续传
+ *   GET /thumb/{filename}   缩略图（应用私有缓存）
+ *   GET /download/{filename} 原图下载（读取 MediaStore contentUri），支持 HTTP Range 断点续传
  */
 class PhotoHttpServer(
     port: Int,
     private val repository: PhotoRepository,
     private val assets: AssetManager,
     private val ftpPort: Int,
-    private val ipProvider: () -> String?
+    private val ipProvider: () -> String?,
+    private val context: Context
 ) : NanoHTTPD(port) {
 
     companion object {
@@ -112,16 +117,17 @@ class PhotoHttpServer(
         return notFound()
     }
 
-    // ---------------- 原图下载（支持 Range 断点） ----------------
+    // ---------------- 原图下载（读取 MediaStore，支持 Range 断点） ----------------
 
     private fun serveDownload(session: IHTTPSession, name: String): Response {
         if (!PhotoJson.isSafeFileName(name)) return notFound()
         val photo = findPhoto(name) ?: return notFound()
-        val file = File(photo.filePath)
-        if (!file.exists()) return notFound()
+        val uri = Uri.parse(photo.contentUri)
+        val fileLen = mediaSize(uri) ?: return notFound()
+        if (fileLen <= 0) return notFound()
 
-        val mime = mimeForImage(file.name)
-        val fileLen = file.length()
+        val mime = mimeForImage(photo.fileName)
+        val input = context.contentResolver.openInputStream(uri) ?: return notFound()
         val rangeHeader = session.headers["range"]
 
         // 显式请求了 Range 但范围非法 -> 416
@@ -136,22 +142,31 @@ class PhotoHttpServer(
                     return resp
                 }
             } else {
-                val stream = FileInputStream(file)
-                stream.skipFully(range.start)
+                input.skipFully(range.start)
                 val resp = newFixedLengthResponse(
                     Response.Status.PARTIAL_CONTENT, mime,
-                    LimitedInputStream(stream, range.length), range.length
+                    LimitedInputStream(input, range.length), range.length
                 )
                 resp.addHeader("Content-Range", "bytes ${range.start}-${range.end}/$fileLen")
                 resp.addHeader("Accept-Ranges", "bytes")
-                resp.addHeader("Content-Disposition", "inline; filename=\"${file.name}\"")
+                resp.addHeader("Content-Disposition", "inline; filename=\"${photo.fileName}\"")
                 return resp
             }
         }
 
-        return fileResponse(file, mime).apply {
-            addHeader("Content-Disposition", "inline; filename=\"${file.name}\"")
+        return newFixedLengthResponse(Response.Status.OK, mime, input, fileLen).apply {
+            addHeader("Accept-Ranges", "bytes")
+            addHeader("Content-Disposition", "inline; filename=\"${photo.fileName}\"")
         }
+    }
+
+    /** 通过 MediaStore 查询图片字节数 */
+    private fun mediaSize(uri: Uri): Long? {
+        val c = context.contentResolver.query(
+            uri, arrayOf(MediaStore.Images.Media.SIZE), null, null, null
+        )
+        c?.use { if (it.moveToFirst()) return it.getLong(0) }
+        return null
     }
 
     private fun findPhoto(name: String): PhotoEntity? = runBlocking {
@@ -192,7 +207,7 @@ class PhotoHttpServer(
     private fun notFound(): Response =
         newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not Found")
 
-    private fun FileInputStream.skipFully(count: Long) {
+    private fun InputStream.skipFully(count: Long) {
         var remaining = count
         while (remaining > 0) {
             val skipped = skip(remaining)

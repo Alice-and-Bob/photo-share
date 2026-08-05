@@ -1,22 +1,21 @@
 package com.example.sony_ftp.repository
 
+import android.content.ContentValues
+import android.content.Context
 import android.graphics.BitmapFactory
-import android.os.FileObserver
+import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
 import android.util.Log
 import com.example.sony_ftp.database.PhotoDao
 import com.example.sony_ftp.database.PhotoEntity
 import com.example.sony_ftp.exif.ExifParser
-import com.example.sony_ftp.observer.FileStabilityChecker
-import com.example.sony_ftp.observer.RecursiveFileObserver
 import com.example.sony_ftp.thumbnail.ThumbnailGenerator
 import com.example.sony_ftp.util.ServerConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,50 +23,40 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
 
 /**
- * 照片仓库：唯一的索引维护入口。
+ * 照片仓库：通过 MediaStore 将图片写入系统相册 DCIM/<APP_NAME>/，
+ * 无需「所有文件访问权限」，也不跳转系统设置页（Scoped Storage 规范）。
  *
- * 流程：FTP 上传完成 -> FileObserver 检测 -> 稳定性确认 -> 更新 Room
- *      -> 生成缩略图 -> 网页图库自动刷新。
+ * 流程：
+ *   FTP 上传 -> 落盘到应用私有临时目录 -> 复制进 MediaStore（DCIM/PhotoShare）
+ *            -> 生成缩略图 -> 索引入库 -> 计数器 +1。
  *
- * 设计要点：
- * - 事件驱动，无轮询；
- * - Channel 队列 + 限并发，支持数万张图片且 CPU 占用低；
- * - startupSync() 做增量对账，重启后恢复索引与未完成的缩略图。
+ * 计数器与图库索引均基于 MediaStore 中本应用专属文件夹的真实文件数，保证一致；
+ * 启动对账、清空、重置都直接作用于 MediaStore，不再监听目录。
  */
-@OptIn(ExperimentalCoroutinesApi::class)
 class PhotoRepository(
-    val photoDir: File,
+    private val appContext: Context,
+    private val uploadTempDir: File,
+    private val galleryRelativePath: String,
     private val dao: PhotoDao,
     private val thumbnailGenerator: ThumbnailGenerator,
     private val serverConfig: ServerConfig
 ) {
     companion object {
         private const val TAG = "PhotoRepository"
+        private const val MIME_JPEG = "image/jpeg"
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-    /** 索引任务队列：缩略图/EXIF 处理限制并发，避免占满 CPU */
-    private val indexQueue = Channel<File>(capacity = Channel.UNLIMITED)
-    private val indexingNow = ConcurrentHashMap.newKeySet<String>()
-
-    private val fileObserver = RecursiveFileObserver(photoDir) { event, file ->
-        onFileEvent(event, file)
-    }
-
-    private val counterLock = kotlinx.coroutines.sync.Mutex()
+    private val counterLock = Mutex()
 
     /**
-     * 照片计数器（独立于数据库，便于「清空照片但保留计数」）。
-     * 初始化为持久化值；启动时按磁盘实际文件数校正；每次新增/删除照片时同步。
+     * 照片计数器（独立于数据库，便于「清空照片但保留计数」语义）。
+     * 启动时按系统相册真实文件数校正。
      */
     private val _counter = MutableStateFlow(serverConfig.photoCounter.coerceAtLeast(0))
     val counter: StateFlow<Int> get() = _counter.asStateFlow()
-
-    val photoCount: Flow<Int> get() = dao.countFlow()
 
     private fun persistCounter() {
         serverConfig.photoCounter = _counter.value
@@ -81,58 +70,65 @@ class PhotoRepository(
     }
 
     fun start() {
-        photoDir.mkdirs()
-        fileObserver.start()
-        // 2 个 worker 处理索引队列（EXIF + 缩略图为 IO/CPU 混合任务）
-        repeat(2) {
-            scope.launch(Dispatchers.IO.limitedParallelism(2)) {
-                for (file in indexQueue) {
-                    runCatching { indexFile(file) }
-                        .onFailure { Log.w(TAG, "index failed: $file", it) }
-                    indexingNow.remove(file.absolutePath)
-                }
-            }
-        }
+        uploadTempDir.mkdirs()
         scope.launch { startupSync() }
     }
 
     fun stop() {
         persistCounter()
-        fileObserver.stop()
         scope.cancel()
     }
 
-    // ---------------- 事件入口 ----------------
+    /**
+     * FTP 上传完成回调：tempFile 为写入应用私有临时目录的文件。
+     * 这里把它登记进系统相册（MediaStore），随后删除临时文件。
+     */
+    fun addUploadedFile(tempFile: File, displayName: String) {
+        if (!tempFile.exists() || tempFile.length() == 0L) {
+            Log.w(TAG, "addUploadedFile: temp missing $tempFile")
+            return
+        }
+        scope.launch {
+            val exif = runCatching { ExifParser.parse(tempFile) }.getOrNull()
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(tempFile.absolutePath, bounds)
+            val width = maxOf(bounds.outWidth, 0)
+            val height = maxOf(bounds.outHeight, 0)
+            val fileSize = tempFile.length()
 
-    private fun onFileEvent(event: Int, file: File) {
-        when (event) {
-            FileObserver.CLOSE_WRITE, FileObserver.MOVED_TO -> {
-                // .part 重命名为正式文件名时走 MOVED_TO
-                if (FileStabilityChecker.isImageFile(file.name)) enqueue(file)
+            // 1. 写入 MediaStore（DCIM/PhotoShare），返回 contentUri
+            val uri = saveToMediaStore(displayName, MIME_JPEG, galleryRelativePath, tempFile)
+            if (uri == null) {
+                Log.e(TAG, "saveToMediaStore failed for $displayName (left in temp: $tempFile)")
+                return@launch
             }
-            FileObserver.CREATE -> {
-                if (file.isDirectory) return
-                // CREATE 只做预登记，等 CLOSE_WRITE 再入库，防止显示上传中的图片
-            }
-            FileObserver.DELETE, FileObserver.MOVED_FROM -> {
-                scope.launch {
-                    val existed = dao.getByPath(file.absolutePath) != null
-                    dao.deleteByPath(file.absolutePath)
-                    thumbnailGenerator.deleteThumbFor(file.absolutePath)
-                    if (existed) bumpCounter(-1)
-                }
-            }
+            // 2. 生成缩略图（key 用 uri，删除临时文件后仍可定位缓存）
+            val thumb = thumbnailGenerator.generate(uri.toString()) { tempFile.inputStream() }
+            // 3. 删除临时文件
+            runCatching { tempFile.delete() }
+            // 4. 入库 + 计数
+            val entity = PhotoEntity(
+                id = 0,
+                fileName = displayName,
+                contentUri = uri.toString(),
+                createTime = exif?.dateTimeMillis ?: System.currentTimeMillis(),
+                modifyTime = System.currentTimeMillis(),
+                width = width,
+                height = height,
+                fileSize = fileSize,
+                thumbnailPath = thumb?.absolutePath,
+                thumbnailStatus = if (thumb != null) PhotoEntity.THUMB_READY else PhotoEntity.THUMB_FAILED,
+                exifJson = exif?.toJson(),
+                uploadComplete = true
+            )
+            dao.upsert(entity)
+            bumpCounter(1)
+            Log.i(TAG, "added to gallery: $displayName -> $uri")
         }
     }
 
-    /** FTP Ftplet 的上传完成回调也走这里，双保险 */
-    fun notifyUploadFinished(file: File) {
-        if (FileStabilityChecker.isImageFile(file.name)) enqueue(file)
-    }
-
     /**
-     * 「重置计数器」：将计数器重新校正为磁盘实际图片文件数。
-     * 用于即时修复计数与真实文件不一致的情况。
+     * 「重置计数器」：重新按系统相册中本应用专属文件夹的真实文件数校正计数。
      */
     suspend fun resyncCounter(): Int {
         reconcileCounter()
@@ -140,145 +136,192 @@ class PhotoRepository(
     }
 
     /**
-     * 「清空所有照片」：删除存储目录下全部照片文件与缩略图，并清空索引库。
+     * 「清空所有照片」：删除 DCIM/PhotoShare 下全部照片（MediaStore）+ 索引库 + 缩略图。
      * @param clearCounter true=同步将计数器归零；false=保留当前计数器数值（即使照片已删）
      */
     suspend fun clearAllPhotos(clearCounter: Boolean) {
-        // 先停止目录监听，避免删除过程产生大量 DELETE 事件重复改动计数器
-        fileObserver.stop()
-        try {
-            photoDir.listFiles()?.forEach { it.deleteRecursively() }
-            photoDir.mkdirs()
-            dao.deleteAll()
-            thumbnailGenerator.clearAll()
-            if (clearCounter) {
-                counterLock.withLock {
-                    _counter.value = 0
-                    persistCounter()
-                }
-            } else {
+        val rows = queryGalleryUris()
+        val resolver = appContext.contentResolver
+        rows.forEach { runCatching { resolver.delete(it.uri, null, null) } }
+        dao.deleteAll()
+        thumbnailGenerator.clearAll()
+        // 清理可能残留的临时文件
+        uploadTempDir.listFiles()?.forEach { runCatching { it.delete() } }
+        if (clearCounter) {
+            counterLock.withLock {
+                _counter.value = 0
                 persistCounter()
             }
-            Log.i(TAG, "clearAllPhotos done (clearCounter=$clearCounter)")
-        } finally {
-            fileObserver.start()
-        }
-    }
-
-    private fun enqueue(file: File) {
-        if (indexingNow.add(file.absolutePath)) {
-            indexQueue.trySend(file)
-        }
-    }
-
-    // ---------------- 索引逻辑 ----------------
-
-    private suspend fun indexFile(file: File) {
-        if (!file.exists() || !file.isFile) return
-
-        // 上传安全机制：大小 + 修改时间稳定后才入库
-        if (!FileStabilityChecker.awaitStable(file)) {
-            Log.w(TAG, "file never stabilized, skip: $file")
-            return
-        }
-
-        val existing = dao.getByPath(file.absolutePath)
-        if (existing != null &&
-            existing.fileSize == file.length() &&
-            existing.modifyTime == file.lastModified() &&
-            existing.uploadComplete &&
-            existing.thumbnailStatus == PhotoEntity.THUMB_READY
-        ) {
-            return // 增量更新：内容未变化，跳过
-        }
-
-        val exif = ExifParser.parse(file)
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.absolutePath, bounds)
-
-        val entity = PhotoEntity(
-            id = existing?.id ?: 0,
-            fileName = file.name,
-            filePath = file.absolutePath,
-            createTime = exif.dateTimeMillis ?: file.lastModified(),
-            modifyTime = file.lastModified(),
-            width = maxOf(bounds.outWidth, 0),
-            height = maxOf(bounds.outHeight, 0),
-            fileSize = file.length(),
-            thumbnailPath = null,
-            thumbnailStatus = PhotoEntity.THUMB_PENDING,
-            exifJson = exif.toJson(),
-            uploadComplete = true
-        )
-        val wasNew = existing == null
-        dao.upsert(entity)
-        if (wasNew) bumpCounter(1)
-        generateThumbnail(file)
-    }
-
-    private suspend fun generateThumbnail(file: File) {
-        val result = thumbnailGenerator.generate(file)
-        if (result != null) {
-            dao.updateThumbnail(
-                file.absolutePath,
-                result.thumbFile.absolutePath,
-                PhotoEntity.THUMB_READY
-            )
         } else {
-            dao.updateThumbnail(file.absolutePath, null, PhotoEntity.THUMB_FAILED)
+            persistCounter()
         }
+        Log.i(TAG, "clearAllPhotos done (clearCounter=$clearCounter, removed=${rows.size})")
     }
 
-    // ---------------- 重启恢复 / 增量对账 ----------------
+    // ---------------- MediaStore 读写 ----------------
+
+    private fun galleryCollectionUri(): Uri =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
 
     /**
-     * 启动时做一次增量对账（唯一一次全量遍历，之后全部事件驱动）：
-     * 1. 磁盘上新增/变化的文件 -> 入队索引
-     * 2. 数据库中已删除的文件 -> 移除记录
-     * 3. 缩略图未完成的 -> 继续生成
+     * 通过 MediaStore API 把source写入 DCIM/<APP_NAME>/（RELATIVE_PATH）。
+     * 过程：insert 创建记录(IS_PENDING=1) -> openOutputStream 写入字节 -> IS_PENDING=0 完成登记。
+     * 这样图片立即出现在系统相册，且无需任何存储权限、不跳转设置页。
+     */
+    private fun saveToMediaStore(
+        displayName: String,
+        mimeType: String,
+        relativePath: String,
+        source: File
+    ): Uri? {
+        val resolver = appContext.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
+            put(MediaStore.Images.Media.MIME_TYPE, mimeType)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, relativePath)
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+        }
+        val uri = resolver.insert(galleryCollectionUri(), values) ?: return null
+        return try {
+            resolver.openOutputStream(uri)?.use { out ->
+                source.inputStream().use { it.copyTo(out) }
+            } ?: run {
+                resolver.delete(uri, null, null)
+                null
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                resolver.update(
+                    uri,
+                    ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) },
+                    null,
+                    null
+                )
+            }
+            uri
+        } catch (e: Exception) {
+            Log.e(TAG, "saveToMediaStore error", e)
+            runCatching { resolver.delete(uri, null, null) }
+            null
+        }
+    }
+
+    private data class GalleryRow(
+        val uri: Uri,
+        val displayName: String,
+        val dateAddedSec: Long,
+        val size: Long,
+        val width: Int,
+        val height: Int
+    )
+
+    /** 查询本应用专属相册文件夹（DCIM/PhotoShare）内的所有图片 */
+    private fun queryGalleryUris(): List<GalleryRow> {
+        val result = mutableListOf<GalleryRow>()
+        val resolver = appContext.contentResolver
+        val collection = galleryCollectionUri()
+        val projection = arrayOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DISPLAY_NAME,
+            MediaStore.Images.Media.DATE_ADDED,
+            MediaStore.Images.Media.SIZE,
+            MediaStore.Images.Media.WIDTH,
+            MediaStore.Images.Media.HEIGHT
+        )
+        // 本应用只查询自己写入 RELATIVE_PATH 下的文件，无需 READ 权限（Scoped Storage 下
+        // 无权限也能读取自己贡献的媒体）。
+        val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+            "${MediaStore.Images.Media.RELATIVE_PATH} = ?" else null
+        val selectionArgs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+            arrayOf(galleryRelativePath) else null
+        resolver.query(collection, projection, selection, selectionArgs, null)?.use { c ->
+            val idIdx = c.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+            val nameIdx = c.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+            val addedIdx = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
+            val sizeIdx = c.getColumnIndex(MediaStore.Images.Media.SIZE)
+            val wIdx = c.getColumnIndex(MediaStore.Images.Media.WIDTH)
+            val hIdx = c.getColumnIndex(MediaStore.Images.Media.HEIGHT)
+            while (c.moveToNext()) {
+                val id = c.getLong(idIdx)
+                val uri = android.content.ContentUris.withAppendedId(collection, id)
+                result.add(
+                    GalleryRow(
+                        uri = uri,
+                        displayName = c.getString(nameIdx) ?: "image.jpg",
+                        dateAddedSec = c.getLong(addedIdx),
+                        size = if (sizeIdx >= 0) c.getLong(sizeIdx) else 0L,
+                        width = if (wIdx >= 0) c.getInt(wIdx) else 0,
+                        height = if (hIdx >= 0) c.getInt(hIdx) else 0
+                    )
+                )
+            }
+        }
+        return result
+    }
+
+    // ---------------- 启动对账（DB 与 MediaStore 同步） ----------------
+
+    /**
+     * 启动时做一次对账（唯一一次全量遍历，之后全部事件驱动）：
+     * 1. 相册中新增/变化的文件 -> 补缩略图并入库
+     * 2. 索引库中已不在相册的记录 -> 移除
+     * 3. 计数器校正为相册真实文件数
      */
     private suspend fun startupSync() {
-        val dbPaths = dao.getAllPaths().toHashSet()
-        val diskPaths = HashSet<String>()
+        // 清理临时目录残留（异常退出时可能遗留）
+        uploadTempDir.listFiles()?.forEach { runCatching { it.delete() } }
 
-        photoDir.walkTopDown()
-            .filter { it.isFile && FileStabilityChecker.isImageFile(it.name) }
-            .forEach { file ->
-                diskPaths.add(file.absolutePath)
-                val existing = dao.getByPath(file.absolutePath)
-                if (existing == null ||
-                    existing.fileSize != file.length() ||
-                    existing.modifyTime != file.lastModified() ||
-                    !existing.uploadComplete
-                ) {
-                    enqueue(file)
-                }
+        val rows = queryGalleryUris()
+        val dbUris = dao.getAllUris().toHashSet()
+
+        // 相册中新增/变化的文件 -> 入库并补缩略图
+        for (row in rows) {
+            if (row.uri.toString() in dbUris) continue
+            val thumb = thumbnailGenerator.generate(row.uri.toString()) {
+                appContext.contentResolver.openInputStream(row.uri)
             }
-
-        val removed = dbPaths.filter { it !in diskPaths }
-        if (removed.isNotEmpty()) {
-            removed.chunked(500).forEach { dao.deleteByPaths(it) }
-            removed.forEach { thumbnailGenerator.deleteThumbFor(it) }
+            val entity = PhotoEntity(
+                id = 0,
+                fileName = row.displayName,
+                contentUri = row.uri.toString(),
+                createTime = row.dateAddedSec * 1000,
+                modifyTime = row.dateAddedSec * 1000,
+                width = row.width,
+                height = row.height,
+                fileSize = row.size,
+                thumbnailPath = thumb?.absolutePath,
+                thumbnailStatus = if (thumb != null) PhotoEntity.THUMB_READY else PhotoEntity.THUMB_FAILED,
+                exifJson = null,
+                uploadComplete = true
+            )
+            dao.upsert(entity)
         }
 
-        dao.getPendingThumbnails().forEach { pending ->
-            val f = File(pending.filePath)
-            if (f.exists()) enqueue(f)
+        // 索引库中已不存在于相册的记录 -> 移除
+        val galleryUris = rows.map { it.uri.toString() }.toSet()
+        for (uri in dbUris) {
+            if (uri !in galleryUris) {
+                dao.deleteByUri(uri)
+                thumbnailGenerator.deleteThumbFor(uri)
+            }
         }
-        Log.i(TAG, "startupSync done, disk=${diskPaths.size}, removedFromDb=${removed.size}")
-        // 启动对账后，将计数器校正为磁盘实际文件数（修复「上传后计数不刷新」类问题）
+
+        Log.i(TAG, "startupSync done, gallery=${rows.size}, db=${dbUris.size}")
+        // 启动对账后，将计数器校正为相册真实文件数
         reconcileCounter()
     }
 
-    /** 将计数器校正为磁盘实际图片文件数 */
+    /** 将计数器校正为系统相册中本应用专属文件夹的真实图片数 */
     private suspend fun reconcileCounter() {
-        val disk = photoDir.walkTopDown()
-            .count { it.isFile && FileStabilityChecker.isImageFile(it.name) }
+        val n = queryGalleryUris().size
         counterLock.withLock {
-            _counter.value = disk
+            _counter.value = n
             persistCounter()
         }
-        Log.i(TAG, "counter reconciled to disk=$disk")
+        Log.i(TAG, "counter reconciled to gallery=$n")
     }
 
     // ---------------- HTTP 层查询接口 ----------------

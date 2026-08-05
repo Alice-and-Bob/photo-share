@@ -4,12 +4,8 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
-import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -40,6 +36,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -108,26 +105,10 @@ fun MainScreen(modifier: Modifier = Modifier, vm: MainViewModel = viewModel()) {
     val httpIp = if (ipVal != null) formatUrl("http", ipVal, httpPort, vm.httpDefaultPort) else null
     val ftpIp = if (ipVal != null) formatUrl("ftp", ipVal, ftpPort, vm.ftpDefaultPort) else null
 
-    // 启动服务器前的权限校验：DCIM/PhotoShare 位于共享存储，需「所有文件访问权限」
-    fun ensureStoragePermissionThen(action: () -> Unit) {
-        if (Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()) {
-            Toast.makeText(
-                context,
-                "需授予「所有文件访问权限」才能将照片写入 DCIM/PhotoShare",
-                Toast.LENGTH_LONG
-            ).show()
-            context.startActivity(
-                Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION).apply {
-                    data = Uri.parse("package:${context.packageName}")
-                }
-            )
-        } else {
-            action()
-        }
-    }
-
+    // 照片通过 MediaStore 写入系统相册（DCIM/PhotoShare），无需任何存储权限、不跳转设置页，
+    // 因此启动服务器无需权限门，直接切换即可。
     val onToggleServer = {
-        if (running) vm.stopServer() else ensureStoragePermissionThen { vm.startServer() }
+        if (running) vm.stopServer() else vm.startServer()
     }
 
     // 「清空所有照片」确认弹窗状态

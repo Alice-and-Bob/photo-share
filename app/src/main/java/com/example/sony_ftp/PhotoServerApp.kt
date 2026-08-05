@@ -1,7 +1,6 @@
 package com.example.sony_ftp
 
 import android.app.Application
-import android.os.Environment
 import com.example.sony_ftp.database.PhotoDatabase
 import com.example.sony_ftp.repository.PhotoRepository
 import com.example.sony_ftp.thumbnail.ThumbnailGenerator
@@ -14,21 +13,21 @@ import java.io.File
 class PhotoServerApp : Application() {
 
     /**
-     * 照片上传目录：固定为共享存储 DCIM/PhotoShare。
-     * 写入共享存储需「所有文件访问权限」（MANAGE_EXTERNAL_STORAGE），已在启动服务器时校验。
-     * 放在 DCIM 下，照片可在系统相册中直接显示。
+     * 上传临时目录：FTP 服务器先把图片写入此处（应用私有目录，无需任何权限）。
+     * 上传完成后由仓库转移到系统相册（MediaStore -> DCIM/PhotoShare）。
      */
-    val photoDir: File
-        get() {
-            val dir = File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
-                "PhotoShare"
-            )
-            if (!dir.exists()) dir.mkdirs()
-            return dir
-        }
+    val uploadTempDir: File by lazy { File(filesDir, "ftp_upload_temp") }
 
-    /** 缩略图缓存目录 */
+    /**
+     * 系统相册中的 APP 专属文件夹（MediaStore RELATIVE_PATH，需以 / 结尾）。
+     * 通过 Scoped Storage 写入，无需「所有文件访问权限」，也不会跳转系统设置页。
+     */
+    val galleryRelativePath: String = "DCIM/PhotoShare/"
+
+    /** 用于 UI 展示的相册路径文本（不含存储根，如 DCIM/PhotoShare） */
+    val galleryDisplayPath: String get() = galleryRelativePath.trimEnd('/')
+
+    /** 缩略图缓存目录（应用私有，无需权限） */
     val thumbnailDir: File by lazy {
         File(externalCacheDir ?: cacheDir, "thumbnails")
     }
@@ -39,7 +38,9 @@ class PhotoServerApp : Application() {
 
     val repository: PhotoRepository by lazy {
         PhotoRepository(
-            photoDir = photoDir,
+            appContext = this,
+            uploadTempDir = uploadTempDir,
+            galleryRelativePath = galleryRelativePath,
             dao = database.photoDao(),
             thumbnailGenerator = ThumbnailGenerator(thumbnailDir),
             serverConfig = serverConfig

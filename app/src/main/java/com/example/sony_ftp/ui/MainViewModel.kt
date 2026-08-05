@@ -53,7 +53,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         httpPort = app.serverConfig.httpPort
     )
 
-    val photoDirPath: String get() = app.photoDir.absolutePath
+    /** 系统相册中的 APP 专属路径（DCIM/PhotoShare），通过 MediaStore 写入，无需存储权限 */
+    val photoDirPath: String get() = app.galleryDisplayPath
 
     fun refreshIp() {
         viewModelScope.launch { _ip.value = NetworkUtils.getBestIp() }

@@ -165,16 +165,17 @@ class PhotoServerService : Service() {
         val config = app.serverConfig
 
         try {
-            // 1. 照片索引仓库（FileObserver + 启动对账）
+            // 1. 照片索引仓库（MediaStore 启动对账）
             app.repository.start()
 
-            // 2. FTP：优先 21，失败依次尝试 2121
+            // 2. FTP：优先 21，失败依次尝试 2121；上传先落盘到应用私有临时目录，
+            //    再由仓库写入系统相册（MediaStore -> DCIM/PhotoShare），无需任何存储权限。
             val (ftpManager, actualFtp) = startWithFallback(
                 candidates = ftpCandidates(config.ftpPort),
                 label = "FTP"
             ) { port ->
                 FtpServerManager(
-                    uploadDir = app.photoDir,
+                    uploadDir = app.uploadTempDir,
                     config = FtpServerManager.Config(
                         port = port,
                         username = config.ftpUsername,
@@ -182,7 +183,7 @@ class PhotoServerService : Service() {
                         passivePorts = config.passivePorts,
                         passiveExternalAddress = ip
                     ),
-                    onUploadEnd = { file -> app.repository.notifyUploadFinished(file) }
+                    onUploadEnd = { file -> app.repository.addUploadedFile(file, file.name) }
                 ).also { it.start() }
             }
 
@@ -196,7 +197,8 @@ class PhotoServerService : Service() {
                     repository = app.repository,
                     assets = assets,
                     ftpPort = actualFtp ?: FTP_DEFAULT_PORT,
-                    ipProvider = { NetworkUtils.getBestIp() }
+                    ipProvider = { NetworkUtils.getBestIp() },
+                    context = applicationContext
                 ).also { it.start(fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT, false) }
             }
 
