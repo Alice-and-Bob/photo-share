@@ -26,7 +26,8 @@
 - 遵循 Kotlin 官方代码风格（`kotlin.code.style=official`）；
 - 注释中文 / 英文均可，同一文件内保持一致；
 - 新增依赖请加入 `gradle/libs.versions.toml` 版本目录，勿硬编码版本号；
-- 涉及网络 / 存储的改动请注意权限（`MANAGE_EXTERNAL_STORAGE`）与后台保活（前台服务 + 锁）的兼容性。
+- 存储相关改动必须走 MediaStore（Scoped Storage），**不得**引入 `MANAGE_EXTERNAL_STORAGE`、`WRITE_EXTERNAL_STORAGE` 或对 `DCIM/` 的 File 直写；
+- 涉及网络 / 后台保活的改动请注意前台服务 + 唤醒锁 / Wi-Fi 锁的兼容性。
 
 ## 提交信息约定（推荐）
 

@@ -30,6 +30,12 @@ ui_*.xml
 __pycache__/
 *.pyc
 
+# 发布产物：APK/AAB 不入库（二进制会让仓库体积随每次构建线性膨胀）
+# 分发请走 GitHub Release 附件 / 制品库，或按需启用 Git LFS
+*.apk
+*.aab
+*.apks
+
 # 清理用的临时回收目录（存放从根目录移出的调试产物，不入库）
 /.cleanup_trash/
 

@@ -26,22 +26,14 @@
 
 - **设备**：Android 10（API 29）及以上
 - **构建**：JDK 21、Android SDK（`compileSdk` 36），项目自带 `gradlew`
-- **权限**：安装后需授予「所有文件访问权限」（`MANAGE_EXTERNAL_STORAGE`）以写入 `DCIM/PhotoShare`
+- **权限**：**无需任何存储权限**。照片经 MediaStore（Scoped Storage）写入 `DCIM/PhotoShare`，不会跳转系统设置页
 - **网络**：设备开热点，相机与浏览端连接同一热点
 
 ---
 
 ## 安装
 
-**方式一：安装预构建 APK**
-
-```
-release/photo_share-release-v1.apk
-```
-
-拷贝到设备 → 允许「未知来源」安装 → 首次打开授予「所有文件访问权限」。该包使用本机 debug keystore 签名，仅供直接安装 / 内部测试。
-
-**方式二：从源码构建**
+**从源码构建**（APK 不入库，见 [release/README.md](release/README.md)）
 
 ```bash
 cd sony_ftp
@@ -49,6 +41,10 @@ export ANDROID_HOME=/path/to/Android/Sdk   # 或编辑 local.properties 写 sdk.
 ./gradlew assembleRelease                  # 输出 app/build/outputs/apk/release/
 adb install -r app/build/outputs/apk/release/app-release.apk
 ```
+
+构建产物会同时被复制到 `release/`（该目录下的 APK 已 gitignore）。安装后**无需任何授权步骤**，打开即可用。
+
+> release 包使用本机 debug keystore 签名，仅供直接安装 / 内部测试；上架应用商店请在 `app/build.gradle.kts` 中替换为专用发布密钥。
 
 ---
 
@@ -74,7 +70,7 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 
 ### 1. 相机 FTP 上传（核心）
 
-1. 打开 App → 启动服务器（授予「所有文件访问权限」）。
+1. 打开 App → 启动服务器（无需任何授权）。
 2. 开启手机热点，记下 App 内显示的 FTP 地址（直连 IP，如 `192.168.43.1:2121`）。
 3. 相机连接该热点，FTP 设置：
    - 服务器：App 内显示的 IP（**不是** `photoshare.local`）
@@ -119,7 +115,7 @@ sony_ftp/
 ├── build.gradle.kts         # 顶层构建
 ├── settings.gradle.kts      # 仓库镜像、模块声明
 ├── gradle.properties        # Gradle / Kotlin 守护进程参数
-├── release/                 # 预构建 APK
+├── release/                 # 本地构建产物存放处（APK 不入库）
 └── readme/                  # 补充文档（架构 / 开发 / 贡献 / FAQ）
 ```
 
