@@ -25,11 +25,11 @@ ROOT = os.path.dirname(_HERE)
 def _parse_args():
     p = argparse.ArgumentParser(description="Photo Share - 平板 USB 接入与验证脚本")
     p.add_argument("--device", "-d",
-                   default=os.environ.get("ANDROID_SERIAL") or os.environ.get("DEVICE") or "***REMOVED***",
-                   help="目标设备序列号（默认 ***REMOVED***，或 $ANDROID_SERIAL / $DEVICE）")
+                   default=os.environ.get("ANDROID_SERIAL") or os.environ.get("DEVICE"),
+                   help="目标设备序列号（从 $ANDROID_SERIAL / $DEVICE 读取，或用 --device 指定；无默认值，必须提供）")
     p.add_argument("--adb",
-                   default=os.environ.get("ADB_BIN", r"***REMOVED***/platform-tools/adb.exe"),
-                   help="adb 可执行文件路径（默认 ***REMOVED***/.../adb.exe 或 $ADB_BIN）")
+                   default=os.environ.get("ADB_BIN", "adb"),
+                   help="adb 可执行文件路径（默认从 PATH 查找 `adb`，或用 $ADB_BIN / --adb 指定）")
     p.add_argument("--apk",
                    default=os.path.join(ROOT, "app", "build", "outputs", "apk", "release", "app-release.apk"),
                    help="待安装 APK（默认 <根目录>/app/build/outputs/apk/release/app-release.apk）")
@@ -38,6 +38,8 @@ def _parse_args():
 _ARGS = _parse_args()
 ADB = _ARGS.adb
 DEVICE = _ARGS.device
+if not DEVICE:
+    sys.exit("ERROR: 未指定设备序列号，请设置 $ANDROID_SERIAL / $DEVICE 或传入 --device")
 APK = _ARGS.apk
 PKG = "com.example.sony_ftp"
 GALLERY_REL_PATH = "DCIM/PhotoShare/"
